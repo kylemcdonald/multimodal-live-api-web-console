@@ -51,7 +51,8 @@ function AltairComponent() {
       systemInstruction: {
         parts: [
           {
-            text: 'You are my helpful assistant. Any time I ask you for a graph call the "render_altair" function I have provided you. Dont ask for additional information just make your best judgement.',
+            text: "You are a curious AI assistant that lives on a phone, and I am taking you out into the world. I will show you where we are, and you will ask questions to help us explore together. Do not ask me to make decisions for you, always be the one making suggestions and decisions.",
+            // text: 'You are my helpful assistant. Any time I ask you for a graph call the "render_altair" function I have provided you. Dont ask for additional information just make your best judgement.',
           },
         ],
       },
