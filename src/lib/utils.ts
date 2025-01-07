@@ -19,45 +19,83 @@ export type GetAudioContextOptions = AudioContextOptions & {
 };
 
 const map: Map<string, AudioContext> = new Map();
+let hasUserInteraction = false;
+let userInteractionPromise: Promise<void>;
 
 export const audioContext: (
   options?: GetAudioContextOptions,
 ) => Promise<AudioContext> = (() => {
-  const didInteract = new Promise((res) => {
-    window.addEventListener("pointerdown", res, { once: true });
-    window.addEventListener("keydown", res, { once: true });
+  // Create a promise that resolves on first user interaction
+  userInteractionPromise = new Promise((resolve) => {
+    const handleUserInteraction = () => {
+      hasUserInteraction = true;
+      resolve();
+      // Clean up listeners after first interaction
+      window.removeEventListener("touchstart", handleUserInteraction);
+      window.removeEventListener("touchend", handleUserInteraction);
+      window.removeEventListener("click", handleUserInteraction);
+      window.removeEventListener("pointerdown", handleUserInteraction);
+      window.removeEventListener("keydown", handleUserInteraction);
+    };
+
+    // Add interaction listeners
+    window.addEventListener("touchstart", handleUserInteraction);
+    window.addEventListener("touchend", handleUserInteraction);
+    window.addEventListener("click", handleUserInteraction);
+    window.addEventListener("pointerdown", handleUserInteraction);
+    window.addEventListener("keydown", handleUserInteraction);
   });
 
+  // For iOS Safari, we need to unlock audio playback
+  const unlockAudioContext = async (ctx: AudioContext) => {
+    if (ctx.state === "suspended") {
+      try {
+        // Create and play a brief silent sound
+        const buffer = ctx.createBuffer(1, 1, 44100);
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(0);
+        
+        await ctx.resume();
+        
+        // Wait a bit to ensure the context is properly unlocked
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      } catch (e) {
+        console.warn("Failed to unlock audio context:", e);
+      }
+    }
+    return ctx;
+  };
+
   return async (options?: GetAudioContextOptions) => {
+    // Wait for user interaction before proceeding
+    await userInteractionPromise;
+      
     try {
-      const a = new Audio();
-      a.src =
-        "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
-      await a.play();
       if (options?.id && map.has(options.id)) {
         const ctx = map.get(options.id);
         if (ctx) {
+          await unlockAudioContext(ctx);
           return ctx;
         }
       }
-      const ctx = new AudioContext(options);
+
+      // iOS Safari prefers 44100 Hz
+      const ctx = new AudioContext({
+        ...options,
+        sampleRate: options?.sampleRate || 44100,
+      });
+      
+      await unlockAudioContext(ctx);
+
       if (options?.id) {
         map.set(options.id, ctx);
       }
       return ctx;
     } catch (e) {
-      await didInteract;
-      if (options?.id && map.has(options.id)) {
-        const ctx = map.get(options.id);
-        if (ctx) {
-          return ctx;
-        }
-      }
-      const ctx = new AudioContext(options);
-      if (options?.id) {
-        map.set(options.id, ctx);
-      }
-      return ctx;
+      console.warn("Failed to initialize AudioContext:", e);
+      throw e;
     }
   };
 })();

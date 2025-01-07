@@ -43,6 +43,7 @@ export function useLiveAPI({
     [url, apiKey],
   );
   const audioStreamerRef = useRef<AudioStreamer | null>(null);
+  const [audioInitialized, setAudioInitialized] = useState(false);
 
   const [connected, setConnected] = useState(false);
   const [config, setConfig] = useState<LiveConfig>({
@@ -50,31 +51,57 @@ export function useLiveAPI({
   });
   const [volume, setVolume] = useState(0);
 
-  // register audio for streaming server -> speakers
-  useEffect(() => {
+  // Initialize audio context and streamer on first user interaction
+  const initializeAudio = useCallback(async () => {
     if (!audioStreamerRef.current) {
-      audioContext({ id: "audio-out" }).then((audioCtx: AudioContext) => {
-        audioStreamerRef.current = new AudioStreamer(audioCtx);
-        audioStreamerRef.current
-          .addWorklet<any>("vumeter-out", VolMeterWorket, (ev: any) => {
-            setVolume(ev.data.volume);
-          })
-          .then(() => {
-            // Successfully added worklet
-          });
-      });
+      try {
+        const audioCtx = await audioContext({ id: "audio-out" });
+        const streamer = new AudioStreamer(audioCtx);
+        await streamer.addWorklet<any>("vumeter-out", VolMeterWorket, (ev: any) => {
+          setVolume(ev.data.volume);
+        });
+        audioStreamerRef.current = streamer;
+        setAudioInitialized(true);
+      } catch (error) {
+        console.error('Failed to initialize audio:', error);
+      }
     }
-  }, [audioStreamerRef]);
+  }, []);
+
+  // Add interaction listeners for iOS
+  useEffect(() => {
+    const handleInteraction = () => {
+      initializeAudio();
+    };
+
+    window.addEventListener('touchstart', handleInteraction, { once: true });
+    window.addEventListener('click', handleInteraction, { once: true });
+    window.addEventListener('keydown', handleInteraction, { once: true });
+
+    return () => {
+      window.removeEventListener('touchstart', handleInteraction);
+      window.removeEventListener('click', handleInteraction);
+      window.removeEventListener('keydown', handleInteraction);
+    };
+  }, [initializeAudio]);
 
   useEffect(() => {
     const onClose = () => {
       setConnected(false);
     };
 
-    const stopAudioStreamer = () => audioStreamerRef.current?.stop();
+    const stopAudioStreamer = () => {
+      if (audioStreamerRef.current) {
+        audioStreamerRef.current.stop();
+      }
+    };
 
-    const onAudio = (data: ArrayBuffer) =>
+    const onAudio = async (data: ArrayBuffer) => {
+      if (!audioStreamerRef.current) {
+        await initializeAudio();
+      }
       audioStreamerRef.current?.addPCM16(new Uint8Array(data));
+    };
 
     client
       .on("close", onClose)
@@ -87,30 +114,32 @@ export function useLiveAPI({
         .off("interrupted", stopAudioStreamer)
         .off("audio", onAudio);
     };
-  }, [client]);
+  }, [client, initializeAudio]);
 
   const connect = useCallback(async () => {
-    console.log(config);
-    if (!config) {
-      throw new Error("config has not been set");
+    await initializeAudio();  // Ensure audio is initialized on connect
+    if (audioStreamerRef.current) {
+      await audioStreamerRef.current.resume();
     }
-    client.disconnect();
-    await client.connect(config);
+    await client.connect(config);  // Add config argument
     setConnected(true);
-  }, [client, setConnected, config]);
+  }, [client, initializeAudio, config]);
 
-  const disconnect = useCallback(async () => {
-    client.disconnect();
+  const disconnect = useCallback(async () => {  // Make async
+    await client.disconnect();
+    if (audioStreamerRef.current) {
+      await audioStreamerRef.current.stop();
+    }
     setConnected(false);
-  }, [setConnected, client]);
+  }, [client]);
 
   return {
     client,
-    config,
-    setConfig,
     connected,
     connect,
     disconnect,
     volume,
+    config,
+    setConfig,
   };
 }

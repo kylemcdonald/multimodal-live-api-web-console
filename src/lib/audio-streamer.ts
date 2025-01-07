@@ -27,19 +27,41 @@ export class AudioStreamer {
   private processingBuffer: Float32Array = new Float32Array(0);
   private scheduledTime: number = 0;
   public gainNode: GainNode;
-  public source: AudioBufferSourceNode;
   private isStreamComplete: boolean = false;
   private checkInterval: number | null = null;
-  private initialBufferTime: number = 0.1; //0.1 // 100ms initial buffer
+  private initialBufferTime: number = 0.1;
   private endOfQueueAudioSource: AudioBufferSourceNode | null = null;
+  private silenceSource: OscillatorNode | null = null;
+  private isIOS: boolean;
+  private initialized: boolean = false;
+  private worklets: Map<string, AudioWorkletNode> = new Map();
 
   public onComplete = () => {};
 
   constructor(public context: AudioContext) {
+    // More robust iOS detection
+    const isIOS = [
+      'iPad Simulator',
+      'iPhone Simulator',
+      'iPod Simulator',
+      'iPad',
+      'iPhone',
+      'iPod',
+    ].includes(navigator.platform)
+    // iPad on iOS 13 detection
+    || (navigator.userAgent.includes("Mac") && "ontouchend" in document);
+    
+    this.isIOS = isIOS;
+
     this.gainNode = this.context.createGain();
-    this.source = this.context.createBufferSource();
+    this.gainNode.gain.value = 0; // Start muted
     this.gainNode.connect(this.context.destination);
     this.addPCM16 = this.addPCM16.bind(this);
+
+    // Always try to resume the context in constructor
+    this.context.resume().catch(err => {
+      console.warn("Error resuming context:", err);
+    });
   }
 
   async addWorklet<T extends (d: any) => void>(
@@ -47,34 +69,95 @@ export class AudioStreamer {
     workletSrc: string,
     handler: T,
   ): Promise<this> {
-    let workletsRecord = registeredWorklets.get(this.context);
-    if (workletsRecord && workletsRecord[workletName]) {
-      // the worklet already exists on this context
-      // add the new handler to it
-      workletsRecord[workletName].handlers.push(handler);
-      return Promise.resolve(this);
-      //throw new Error(`Worklet ${workletName} already exists on context`);
+    await this.ensureAudioContextRunning();
+
+    try {
+      if (this.worklets.has(workletName)) {
+        const worklet = this.worklets.get(workletName)!;
+        worklet.port.onmessage = (ev: MessageEvent) => handler.call(worklet.port, ev);
+        return this;
+      }
+
+      const src = createWorketFromSrc(workletName, workletSrc);
+      await this.context.audioWorklet.addModule(src);
+      
+      const worklet = new AudioWorkletNode(this.context, workletName, {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        channelCount: 1,
+        processorOptions: {
+          sampleRate: this.sampleRate,
+        }
+      });
+
+      worklet.port.onmessage = (ev: MessageEvent) => handler.call(worklet.port, ev);
+      worklet.connect(this.context.destination);
+      this.worklets.set(workletName, worklet);
+
+      return this;
+    } catch (error) {
+      console.warn('Failed to add audio worklet:', error);
+      throw error;
     }
-
-    if (!workletsRecord) {
-      registeredWorklets.set(this.context, {});
-      workletsRecord = registeredWorklets.get(this.context)!;
-    }
-
-    // create new record to fill in as becomes available
-    workletsRecord[workletName] = { handlers: [handler] };
-
-    const src = createWorketFromSrc(workletName, workletSrc);
-    await this.context.audioWorklet.addModule(src);
-    const worklet = new AudioWorkletNode(this.context, workletName);
-
-    //add the node into the map
-    workletsRecord[workletName].node = worklet;
-
-    return this;
   }
 
-  addPCM16(chunk: Uint8Array) {
+  private async initialize() {
+    if (this.initialized) return;
+    
+    try {
+      await this.context.resume();
+      
+      if (this.isIOS) {
+        await this.initializeSilentAudio();
+      }
+      
+      // For iOS, we need to wait for a user gesture to set the gain
+      if (this.isIOS) {
+        this.gainNode.gain.value = 0;
+      } else {
+        this.gainNode.gain.setValueAtTime(1, this.context.currentTime);
+      }
+      
+      this.initialized = true;
+    } catch (error) {
+      console.warn('Failed to initialize audio:', error);
+      throw error;
+    }
+  }
+
+  private async initializeSilentAudio() {
+    try {
+      this.silenceSource = this.context.createOscillator();
+      const silenceGain = this.context.createGain();
+      silenceGain.gain.value = 0.0001;
+      this.silenceSource.connect(silenceGain);
+      silenceGain.connect(this.context.destination);
+      
+      const buffer = this.context.createBuffer(1, 1, this.context.sampleRate);
+      const source = this.context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.context.destination);
+      
+      this.silenceSource.start();
+      source.start(0);
+    } catch (error) {
+      console.warn('Failed to initialize silent audio:', error);
+      throw error;
+    }
+  }
+
+  private async ensureAudioContextRunning() {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+    if (this.context.state !== "running") {
+      await this.context.resume();
+    }
+  }
+
+  async addPCM16(chunk: Uint8Array) {
+    await this.ensureAudioContextRunning();
+
     const float32Array = new Float32Array(chunk.length / 2);
     const dataView = new DataView(chunk.buffer);
 
@@ -83,10 +166,7 @@ export class AudioStreamer {
         const int16 = dataView.getInt16(i * 2, true);
         float32Array[i] = int16 / 32768;
       } catch (e) {
-        console.error(e);
-        // console.log(
-        //   `dataView.length: ${dataView.byteLength},  i * 2: ${i * 2}`,
-        // );
+        console.error('Error processing PCM data:', e);
       }
     }
 
@@ -105,9 +185,8 @@ export class AudioStreamer {
 
     if (!this.isPlaying) {
       this.isPlaying = true;
-      // Initialize scheduledTime only when we start playing
       this.scheduledTime = this.context.currentTime + this.initialBufferTime;
-      this.scheduleNextBuffer();
+      await this.scheduleNextBuffer();
     }
   }
 
@@ -121,7 +200,9 @@ export class AudioStreamer {
     return audioBuffer;
   }
 
-  private scheduleNextBuffer() {
+  private async scheduleNextBuffer() {
+    await this.ensureAudioContextRunning();
+
     const SCHEDULE_AHEAD_TIME = 0.2;
 
     while (
@@ -138,10 +219,7 @@ export class AudioStreamer {
         }
         this.endOfQueueAudioSource = source;
         source.onended = () => {
-          if (
-            !this.audioQueue.length &&
-            this.endOfQueueAudioSource === source
-          ) {
+          if (!this.audioQueue.length && this.endOfQueueAudioSource === source) {
             this.endOfQueueAudioSource = null;
             this.onComplete();
           }
@@ -151,31 +229,12 @@ export class AudioStreamer {
       source.buffer = audioBuffer;
       source.connect(this.gainNode);
 
-      const worklets = registeredWorklets.get(this.context);
-
-      if (worklets) {
-        Object.entries(worklets).forEach(([workletName, graph]) => {
-          const { node, handlers } = graph;
-          if (node) {
-            source.connect(node);
-            node.port.onmessage = function (ev: MessageEvent) {
-              handlers.forEach((handler) => {
-                handler.call(node.port, ev);
-              });
-            };
-            node.connect(this.context.destination);
-          }
-        });
+      for (const worklet of this.worklets.values()) {
+        source.connect(worklet);
       }
 
-      // i added this trying to fix clicks
-      // this.gainNode.gain.setValueAtTime(0, 0);
-      // this.gainNode.gain.linearRampToValueAtTime(1, 1);
-
-      // Ensure we never schedule in the past
       const startTime = Math.max(this.scheduledTime, this.context.currentTime);
       source.start(startTime);
-
       this.scheduledTime = startTime + audioBuffer.duration;
     }
 
@@ -208,7 +267,29 @@ export class AudioStreamer {
     }
   }
 
-  stop() {
+  async resume() {
+    await this.ensureAudioContextRunning();
+    
+    if (this.isIOS) {
+      const buffer = this.context.createBuffer(1, 1, 44100);
+      const source = this.context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.context.destination);
+      source.start(0);
+      
+      const currentTime = this.context.currentTime;
+      this.gainNode.gain.cancelScheduledValues(currentTime);
+      this.gainNode.gain.setValueAtTime(0, currentTime);
+      this.gainNode.gain.linearRampToValueAtTime(1, currentTime + 0.1);
+    } else {
+      this.gainNode.gain.setValueAtTime(1, this.context.currentTime);
+    }
+    
+    this.isStreamComplete = false;
+    this.scheduledTime = this.context.currentTime + this.initialBufferTime;
+  }
+
+  async stop() {
     this.isPlaying = false;
     this.isStreamComplete = true;
     this.audioQueue = [];
@@ -220,25 +301,27 @@ export class AudioStreamer {
       this.checkInterval = null;
     }
 
-    this.gainNode.gain.linearRampToValueAtTime(
-      0,
-      this.context.currentTime + 0.1,
-    );
+    if (this.silenceSource) {
+      this.silenceSource.stop();
+      this.silenceSource.disconnect();
+      this.silenceSource = null;
+    }
+
+    for (const worklet of this.worklets.values()) {
+      worklet.disconnect();
+    }
+    this.worklets.clear();
+
+    const currentTime = this.context.currentTime;
+    this.gainNode.gain.cancelScheduledValues(currentTime);
+    this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, currentTime);
+    this.gainNode.gain.linearRampToValueAtTime(0, currentTime + 0.1);
 
     setTimeout(() => {
       this.gainNode.disconnect();
       this.gainNode = this.context.createGain();
       this.gainNode.connect(this.context.destination);
     }, 200);
-  }
-
-  async resume() {
-    if (this.context.state === "suspended") {
-      await this.context.resume();
-    }
-    this.isStreamComplete = false;
-    this.scheduledTime = this.context.currentTime + this.initialBufferTime;
-    this.gainNode.gain.setValueAtTime(1, this.context.currentTime);
   }
 
   complete() {
