@@ -30,6 +30,7 @@ export type ControlTrayProps = {
   children?: ReactNode;
   supportsVideo: boolean;
   onVideoStreamChange?: (stream: MediaStream | null) => void;
+  onCameraFlip?: (isFront: boolean) => void;
 };
 
 type MediaStreamButtonProps = {
@@ -38,15 +39,16 @@ type MediaStreamButtonProps = {
   offIcon: string;
   start: () => Promise<any>;
   stop: () => any;
+  onClick?: () => Promise<any>;
 };
 
 /**
  * button used for triggering webcam or screen-capture
  */
 const MediaStreamButton = memo(
-  ({ isStreaming, onIcon, offIcon, start, stop }: MediaStreamButtonProps) =>
+  ({ isStreaming, onIcon, offIcon, start, stop, onClick }: MediaStreamButtonProps) =>
     isStreaming ? (
-      <button className="action-button" onClick={stop}>
+      <button className="action-button" onClick={onClick || stop}>
         <span className="material-symbols-outlined">{onIcon}</span>
       </button>
     ) : (
@@ -61,10 +63,13 @@ function ControlTray({
   children,
   onVideoStreamChange = () => {},
   supportsVideo,
+  onCameraFlip,
 }: ControlTrayProps) {
   const videoStreams = [useWebcam(), useScreenCapture()];
   const [activeVideoStream, setActiveVideoStream] =
     useState<MediaStream | null>(null);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [webcam, screenCapture] = videoStreams;
   const [inVolume, setInVolume] = useState(0);
   const [audioRecorder] = useState(() => new AudioRecorder());
@@ -148,12 +153,28 @@ function ControlTray({
       const mediaStream = await next.start();
       setActiveVideoStream(mediaStream);
       onVideoStreamChange(mediaStream);
+      // When starting webcam, we're always starting with front camera
+      if (next === webcam) {
+        setIsFrontCamera(true);
+        onCameraFlip?.(true);
+      }
     } else {
       setActiveVideoStream(null);
       onVideoStreamChange(null);
     }
 
     videoStreams.filter((msr) => msr !== next).forEach((msr) => msr.stop());
+  };
+
+  const handleFlipCamera = async () => {
+    if (webcam.flipCamera) {
+      const mediaStream = await webcam.flipCamera();
+      setActiveVideoStream(mediaStream);
+      onVideoStreamChange(mediaStream);
+      const newIsFrontCamera = !isFrontCamera;
+      setIsFrontCamera(newIsFrontCamera);
+      onCameraFlip?.(newIsFrontCamera);
+    }
   };
 
   return (
@@ -177,13 +198,24 @@ function ControlTray({
 
         {supportsVideo && (
           <>
-            <MediaStreamButton
-              isStreaming={screenCapture.isStreaming}
-              start={changeStreams(screenCapture)}
-              stop={changeStreams()}
-              onIcon="cancel_presentation"
-              offIcon="present_to_all"
-            />
+            {isIOS ? (
+              <MediaStreamButton
+                isStreaming={webcam.isStreaming}
+                start={changeStreams(webcam)}
+                stop={changeStreams()}
+                onIcon="flip_camera_ios"
+                offIcon="flip_camera_ios"
+                onClick={handleFlipCamera}
+              />
+            ) : (
+              <MediaStreamButton
+                isStreaming={screenCapture.isStreaming}
+                start={changeStreams(screenCapture)}
+                stop={changeStreams()}
+                onIcon="cancel_presentation"
+                offIcon="present_to_all"
+              />
+            )}
             <MediaStreamButton
               isStreaming={webcam.isStreaming}
               start={changeStreams(webcam)}

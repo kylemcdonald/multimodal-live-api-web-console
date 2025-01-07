@@ -174,4 +174,8 @@ body {
   max-width: 90%;
   border-radius: 32px;
   max-height: fit-content;
+  
+  &.front-camera {
+    transform: scaleX(-1); /* Mirror only when front camera is active */
+  }
 }

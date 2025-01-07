@@ -36,6 +36,8 @@ function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   // either the screen capture, the video or null, if null we hide it
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const [isFrontCamera, setIsFrontCamera] = useState(true); // Always start with front camera
 
   return (
     <div className="App">
@@ -49,6 +51,7 @@ function App() {
               <video
                 className={cn("stream", {
                   hidden: !videoRef.current || !videoStream,
+                  'front-camera': isFrontCamera
                 })}
                 ref={videoRef}
                 autoPlay
@@ -60,6 +63,7 @@ function App() {
               videoRef={videoRef}
               supportsVideo={true}
               onVideoStreamChange={setVideoStream}
+              onCameraFlip={(isFront) => setIsFrontCamera(isFront)}
             >
               {/* put your own buttons here */}
             </ControlTray>
